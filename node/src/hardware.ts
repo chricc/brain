@@ -55,7 +55,12 @@ async function diskFreeGb(): Promise<number | null> {
 }
 
 export async function detectHardware(mock: boolean): Promise<HardwareReport> {
-  const gpus = mock ? [MOCK_GPU] : await nvidiaSmi();
+  const gpus = mock
+  ? [MOCK_GPU]
+  : await (async () => {
+      const nvidia = await nvidiaSmi();
+      return nvidia.length ? nvidia : await amdWindowsGpu();
+    })();
   const c = cpus();
   return {
     os: { platform: platform(), release: release().split("-")[0] ?? release(), arch: arch() },
@@ -71,7 +76,9 @@ export async function detectHardware(mock: boolean): Promise<HardwareReport> {
 
 /** Live telemetry for a heartbeat. GPU figures from nvidia-smi when present; mock reports load only. */
 export async function sampleTelemetry(mock: boolean, activeJobs: number, maxConcurrency: number, loadedModels: string[], rttMs: number | null): Promise<Telemetry> {
-  const g = mock ? MOCK_GPU : (await nvidiaSmi())[0];
+  const g = mock
+  ? MOCK_GPU
+  : (await detectHardware(false)).gpus[0];
   return {
     gpuUtilPct: mock ? Math.min(100, Math.round((100 * activeJobs) / Math.max(1, maxConcurrency))) : (g?.utilizationPct ?? null),
     vramUsedMb: g?.vramUsedMb ?? null,
@@ -84,3 +91,69 @@ export async function sampleTelemetry(mock: boolean, activeJobs: number, maxConc
     rttMs,
   };
 }
+
+
+/**
+ * Experimental AMD detection on Windows.
+ * Reads an existing DxDiag report.
+ * Does not invent live telemetry values.
+ */
+export async function amdWindowsGpu(): Promise<GpuReport[]> {
+  if (platform() !== "win32") return [];
+
+  const { readFile } = await import("node:fs/promises");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+
+  const reportPath = join(tmpdir(), "brain-dxdiag.txt");
+
+  let report: string;
+
+  try {
+    report = await readFile(reportPath, "utf8");
+  } catch {
+    return [];
+  }
+
+  const sections = report.split(
+    /(?=^\s*Card name:)/gm
+  );
+
+  for (const section of sections) {
+    const name = /^\s*Card name:\s*(.+)$/m.exec(section)?.[1]?.trim();
+
+    if (!name || !/AMD Radeon RX 9070 XT/i.test(name)) {
+      continue;
+    }
+
+    const memoryText =
+      /^\s*Dedicated Memory:\s*(\d+)\s*MB/m.exec(section)?.[1];
+
+    const driver =
+      /^\s*Driver Version:\s*([\d.]+)/m.exec(section)?.[1];
+
+    const memoryMb = memoryText
+      ? Number(memoryText)
+      : null;
+
+    if (!memoryMb || memoryMb <= 0) {
+      return [];
+    }
+
+    return [{
+      index: 0,
+      model: name,
+      vramTotalMb: memoryMb,
+      vramUsedMb: null,
+      utilizationPct: null,
+      temperatureC: null,
+      powerW: null,
+      driverVersion: driver ?? null,
+      cudaVersion: null,
+      source: "none",
+    }];
+  }
+
+  return [];
+}
+
