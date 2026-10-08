@@ -3,7 +3,7 @@ import path from "node:path";
 import { createHash } from "node:crypto";
 import { Pool, type QueryConfig } from "pg";
 import type { DistributedJob, RewardAllocation, RewardClaim, RewardEpoch } from "@/domain/types";
-import { Breaker, isPoolerRejection, StoreUnavailableError } from "./failsoft";
+import { Breaker, StoreConflictError, StoreUnavailableError, isPoolerRejection } from "./failsoft";
 import { KeyedMutex, MONOTONIC_NODE_COUNTERS, type DocKind, type DocQuery, type NetworkStore, type StoredChallenge, type StoredJob, type StoredNode, type WorkAggregate, type WorkRecord } from "./store";
 
 /** `(jsonb->>'k')::numeric`, 0 when absent. Only ever called with the fixed counter names above. */
@@ -40,6 +40,17 @@ export class PgStore implements NetworkStore {
    * holders exhaust it and every query on the instance (including read-only routes) waits forever.
    */
   private lockPool: Pool;
+  /**
+   * Supabase's transaction-mode pooler (port 6543) intermittently poisons its pool for a user and
+   * then rejects every connection with "Authentication credentials are invalid … reconnect with
+   * fresh credentials" although the credentials are unchanged and the session-mode pooler (5432)
+   * on the same host accepts them. When that happens this instance switches to session mode for a
+   * while instead of taking the site down. Session mode holds one backend per client, so these
+   * pools are tiny and drop idle sockets fast. null when the URL is not a Supabase pooler URL.
+   */
+  private sessionPools: { pool: Pool; lockPool: Pool } | null = null;
+  private sessionUntil = 0;
+  private static readonly SESSION_FALLBACK_MS = 5 * 60_000;
   private ready: Promise<void>;
   constructor(connectionString: string) {
     // Hosted Postgres (Supabase, Neon, Prisma) requires TLS; local docker usually has none.
@@ -68,6 +79,19 @@ export class PgStore implements NetworkStore {
     this.lockPool = new Pool({ ...common, max: 2 });
     // Idle-client errors (pooler closing a socket) must not become unhandled rejections that kill the instance.
     for (const pool of [this.pool, this.lockPool]) pool.on("error", (e) => console.warn("[pgStore] idle client error:", e.message));
+    try {
+      const u = new URL(cs);
+      if (/\.pooler\.supabase\.com$/.test(u.hostname) && u.port === "6543") {
+        u.port = "5432";
+        // Session mode admits at most pool_size clients for the whole project (15 on small compute),
+        // shared by every warm instance: one client per pool, released after 3 s idle.
+        const session = { ...common, connectionString: u.toString(), idleTimeoutMillis: 3_000 };
+        this.sessionPools = { pool: new Pool({ ...session, max: 1 }), lockPool: new Pool({ ...session, max: 1 }) };
+        for (const pool of [this.sessionPools.pool, this.sessionPools.lockPool]) pool.on("error", (e) => console.warn("[pgStore] idle session client error:", e.message));
+      }
+    } catch {
+      /* not a URL */
+    }
     this.ready = this.migrate();
   }
 
@@ -134,12 +158,49 @@ export class PgStore implements NetworkStore {
    */
   private breaker = new Breaker({ threshold: 2, openMs: 15_000 });
 
+  private inSessionFallback() {
+    return this.sessionPools != null && Date.now() < this.sessionUntil;
+  }
+
+  /**
+   * Run `primary` against the transaction pooler; if it is rejecting this user's credentials and a
+   * session-mode pooler exists, run `fallback` there and stay on session mode for a few minutes.
+   */
+  private async viaPooler<T>(primary: () => Promise<T>, fallback: () => Promise<T>): Promise<T> {
+    const viaSession = async () => {
+      try {
+        return await retryPoolerRejection(fallback);
+      } catch (e) {
+        console.warn("[pgStore] session pooler failed:", (e as Error).message.slice(0, 120));
+        throw e;
+      }
+    };
+    if (this.inSessionFallback()) return viaSession();
+    try {
+      return await retryPoolerRejection(primary);
+    } catch (e) {
+      if (!this.sessionPools || !isPoolerRejection(e)) throw e;
+      this.sessionUntil = Date.now() + PgStore.SESSION_FALLBACK_MS;
+      console.warn(`[pgStore] transaction pooler rejecting credentials; using session pooler for ${PgStore.SESSION_FALLBACK_MS / 1000}s:`, (e as Error).message.slice(0, 80));
+      return viaSession();
+    }
+  }
+
   /** Pool query gated on the schema being applied and on the breaker. */
   private q<T extends Record<string, unknown> = Record<string, unknown>>(text: string, params?: unknown[]) {
     return this.breaker.run(async () => {
       await this.ready;
-      return retryPoolerRejection(() => this.pool.query<T>(text, params));
+      return this.viaPooler(
+        () => this.pool.query<T>(text, params),
+        () => this.sessionPools!.pool.query<T>(text, params),
+      );
     });
+  }
+
+  /** Which pooler mode this instance is on right now. For operational views only. */
+  poolerMode(): "transaction" | "session" | "direct" {
+    if (!this.sessionPools) return this.portNum === 6543 ? "transaction" : "direct";
+    return this.inSessionFallback() ? "session" : "transaction";
   }
 
   /** Whether this instance is currently refusing database work. For status views only. */
@@ -159,12 +220,16 @@ export class PgStore implements NetworkStore {
       // behind transaction-mode poolers (Supabase/pgbouncer): lock and unlock can land on different
       // backends and the lock leaks forever. A transaction is pinned to one backend and the lock
       // is released at COMMIT no matter what.
-      const c = await this.breaker.run(() => retryPoolerRejection(() => this.lockPool.connect()));
+      const c = await this.breaker.run(() => this.viaPooler(() => this.lockPool.connect(), () => this.sessionPools!.lockPool.connect()));
       let locked = false;
       let clean = false;
       try {
         await c.query("BEGIN");
-        await c.query("SET LOCAL lock_timeout = '3s'");
+        // Up to 64 units of one job return within the same second from different instances, each
+        // holding this lock for a read-modify-write of the parent. 3 s was not enough to wait out
+        // the queue, and giving up meant proceeding unlocked. The CAS in saveDistributedJob now
+        // guards the data either way; the wait keeps contention from turning into retries.
+        await c.query("SET LOCAL lock_timeout = '20s'");
         try {
           await c.query("SELECT pg_advisory_xact_lock(hashtext($1))", [key]);
           locked = true;
@@ -555,11 +620,19 @@ export class PgStore implements NetworkStore {
     return { lamports: Number(x?.lamports ?? 0), count: Number(x?.count ?? 0), wallets: Number(x?.wallets ?? 0), firstAt: x?.first_at ? Number(x.first_at) : null, lastAt: x?.last_at ? Number(x.last_at) : null };
   }
   async saveDistributedJob(j: DistributedJob) {
-    await this.q(
+    // Compare-and-swap on the revision held in the document: the update only lands if the stored
+    // row still carries the rev this copy was read at (rows written before revs existed count as 0).
+    // On success the caller's object takes the new rev so its next save in the same flow is valid.
+    const expected = j.rev ?? 0;
+    const next = expected + 1;
+    const r = await this.q(
       `INSERT INTO brain_distributed_jobs (id, status, created_at, data) VALUES ($1, $2, $3, $4)
-       ON CONFLICT (id) DO UPDATE SET status = $2, data = $4`,
-      [j.id, j.status, j.createdAt, JSON.stringify(j)],
+       ON CONFLICT (id) DO UPDATE SET status = $2, data = $4
+       WHERE COALESCE((brain_distributed_jobs.data->>'rev')::int, 0) = $5`,
+      [j.id, j.status, j.createdAt, JSON.stringify({ ...j, rev: next }), expected],
     );
+    if (r.rowCount === 0) throw new StoreConflictError("distributed job", j.id);
+    j.rev = next;
   }
   async getDistributedJob(id: string) {
     const r = await this.q(`SELECT data FROM brain_distributed_jobs WHERE id = $1`, [id]);

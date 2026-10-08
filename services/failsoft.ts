@@ -13,6 +13,32 @@
  *                  previous body the route still fails, now in milliseconds instead of seconds.
  */
 
+/** A compare-and-swap save lost: the document changed since it was read. Re-read and apply again. */
+export class StoreConflictError extends Error {
+  readonly code = "store_conflict";
+  constructor(kind: string, id: string) {
+    super(`${kind} ${id} changed since it was read`);
+    this.name = "StoreConflictError";
+  }
+}
+
+/** Structural check for the same reason as isStoreUnavailable: the class can exist twice at runtime. */
+export function isStoreConflict(e: unknown): e is StoreConflictError {
+  return typeof e === "object" && e != null && (e as { code?: unknown }).code === "store_conflict";
+}
+
+/** Re-run `fn` while it fails with a StoreConflictError; the function must be safe to repeat from its first read. */
+export async function retryOnConflict<T>(fn: () => Promise<T>, attempts = 8): Promise<T> {
+  for (let i = 0; ; i++) {
+    try {
+      return await fn();
+    } catch (e) {
+      if (!isStoreConflict(e) || i >= attempts - 1) throw e;
+      await new Promise((r) => setTimeout(r, 15 + Math.random() * 60 * (i + 1)));
+    }
+  }
+}
+
 export class StoreUnavailableError extends Error {
   readonly code = "database_unavailable";
   readonly status = 503;
@@ -69,7 +95,8 @@ export function isPoolerRejection(e: unknown): boolean {
   const err = e as { code?: string; message?: string } | null;
   if (!err) return false;
   const msg = String(err.message ?? "");
-  if (/max client connections reached|EMAXCONN/i.test(msg)) return true;
+  // "max client connections reached" (transaction mode), "MaxClientsInSessionMode … max clients reached" (session mode).
+  if (/max client connections reached|max clients reached|MaxClientsInSessionMode|EMAXCONN/i.test(msg)) return true;
   return String(err.code ?? "") === "28P01" && /restore pool functionality|reconnect with fresh credentials/i.test(msg);
 }
 
