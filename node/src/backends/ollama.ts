@@ -3,7 +3,7 @@ import { MODEL_ALLOWLIST } from "../../models";
 import type { JobPayload } from "../../protocol";
 import type { GenerateResult, InferenceBackend } from "./types";
 
-const BASE = "http://127.0.0.1:11434";
+const BASE = process.env.BRAIN_OLLAMA_URL || "http://127.0.0.1:11434";
 const OLLAMA_MODEL = "qwen2.5:1.5b";
 const BRAIN_MODEL = "qwen/qwen2.5-1.5b-instruct";
 
