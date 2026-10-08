@@ -2,7 +2,7 @@
   "name": "@brain/node",
   "version": "0.1.0",
   "private": true,
-  "description": "Brain Node agent: contributes a GPU to the Brain compute network. Outbound-only, signed protocol, vLLM in Docker or mock mode.",
+  "description": "Brain Node agent: contributes a GPU to the Brain compute network. Outbound-only, signed protocol, vLLM, experimental Ollama, or mock mode.",
   "type": "module",
   "engines": {
     "node": ">=20.9"
