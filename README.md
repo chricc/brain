@@ -32,6 +32,35 @@ Live at [brainnetwork.app](https://brainnetwork.app). Docs: [docs.brainnetwork.a
 
 <img src=".github/assets/divider.svg" width="100%" alt="">
 
+
+## Experimental AMD GPU + Ollama Support (Community Fork)
+
+> **Unofficial community experiment.** This integration is not part of the official BRAIN Network release.
+
+This fork adds experimental support for running a BRAIN node with an **AMD Radeon GPU using Ollama**, without requiring NVIDIA CUDA or vLLM.
+
+**Tested configuration:**
+- GPU: AMD Radeon RX 9070 XT (16 GB VRAM)
+- Operating system: Windows
+- Inference backend: Ollama
+- Model: Qwen 2.5 1.5B Instruct
+- Coordinator: Local BRAIN development server
+
+**Verified locally:**
+- Node successfully registered as `ONLINE`
+- Two inference jobs completed through the local coordinator
+- Streaming inference and GPU execution tested
+- TypeScript checks passed
+- 231 automated tests passed, 3 skipped
+
+**Limitations:** Compatibility with the public BRAIN coordinator has not been verified. Public network participation, official support and SOL rewards are **not guaranteed**.
+
+For setup instructions and technical details, see [AMD + Ollama Node Guide](node/OLLAMA-AMD.md).
+
+This work is maintained as an independent community experiment and is not an official BRAIN Network release.
+
+---
+
 ## Run a Node
 
 A Brain Node is an outbound-only agent. It generates an ed25519 identity, reports its hardware, heartbeats every 15 s, long-polls for work, and runs allowlisted open-weight models in an isolated vLLM container. It opens no ports.
