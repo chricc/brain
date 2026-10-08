@@ -56,7 +56,7 @@ export interface HardwareReport {
   mock: boolean;
 }
 
-export type Backend = "mock" | "vllm";
+export type Backend = "mock" | "vllm" | "ollama";
 
 export interface NodeCapabilities {
   backend: Backend;

@@ -296,7 +296,7 @@ export async function reportStarted(nodeId: string, jobId: string, body: Started
   return locked(jobId, async () => {
     const j = await owned(jobId, nodeId);
     if (j.state !== "ASSIGNED") return j;
-    j.backend = body.backend === "vllm" ? "vllm" : "mock";
+    j.backend = body.backend === "vllm" || body.backend === "ollama" ? body.backend : "mock";
     j.modelLoaded = body.loaded === true;
     j.startedAt = now;
     transition(j, "STARTING", now, body.loaded ? "model loaded on demand" : undefined);

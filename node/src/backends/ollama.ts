@@ -15,7 +15,7 @@ const BRAIN_MODEL = "qwen/qwen2.5-1.5b-instruct";
  * official model or benchmark requirements.
  */
 export class OllamaBackend implements InferenceBackend {
-  readonly kind = "vllm" as const;
+  readonly kind = "ollama" as const;
 
   private loaded = false;
 

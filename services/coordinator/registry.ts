@@ -162,7 +162,7 @@ export function listNativeNodes(maxAgeMs = 2_000): Promise<NativeNode[]> {
 const invalidate = () => (cache.__brainNNodes = undefined);
 
 const sanitizeCaps = (c: NodeCapabilities): NodeCapabilities => ({
-  backend: c.backend === "vllm" ? "vllm" : "mock",
+  backend: c.backend === "vllm" || c.backend === "ollama" ? c.backend : "mock",
   supportedModels: filterAllowed(Array.isArray(c.supportedModels) ? c.supportedModels.map(String) : []).slice(0, 32),
   loadedModels: filterAllowed(Array.isArray(c.loadedModels) ? c.loadedModels.map(String) : []).slice(0, 32),
   maxConcurrency: Math.max(1, Math.min(16, Math.floor(Number(c.maxConcurrency) || 1))),
