@@ -1,5 +1,6 @@
 import { Agent } from "./agent";
 import { MockBackend } from "./backends/mock";
+import { OllamaBackend } from "./backends/ollama";
 import type { InferenceBackend } from "./backends/types";
 import { VllmBackend } from "./backends/vllm";
 import { nvidiaSmi } from "./hardware";
@@ -22,17 +23,50 @@ import { HttpTransport } from "./transport";
 async function main() {
   const id = loadIdentity();
   const url = process.env.BRAIN_COORDINATOR_URL || "https://brainnetwork.app";
+if (process.env.BRAIN_NODE_MODE === "ollama") {
+  const coordinator = new URL(url);
+  const host = coordinator.hostname.toLowerCase();
+
+  if (!["localhost", "127.0.0.1", "::1"].includes(host)) {
+    throw new Error(
+      "Modalità Ollama sperimentale: consentito soltanto un coordinatore locale."
+    );
+  }
+}
   const gpus = await nvidiaSmi();
   const mode = process.env.BRAIN_NODE_MODE || (gpus.length ? "vllm" : "mock");
-  if (mode !== "mock" && mode !== "vllm") throw new Error(`BRAIN_NODE_MODE must be mock or vllm, got ${mode}`);
+  if (mode !== "mock" && mode !== "vllm" && mode !== "ollama")
+  throw new Error(`BRAIN_NODE_MODE must be mock, vllm or ollama, got ${mode}`);
   const mock = mode === "mock";
-  if (!mock && !gpus.length) throw new Error("BRAIN_NODE_MODE=vllm but nvidia-smi found no GPU. Use BRAIN_NODE_MODE=mock to run a simulated node.");
+  if (mode === "vllm" && !gpus.length)
+  throw new Error("BRAIN_NODE_MODE=vllm richiede una GPU NVIDIA rilevata da nvidia-smi.");
   const models = (process.env.BRAIN_NODE_MODELS ?? "").split(",").map((s) => s.trim()).filter(Boolean);
-  const backend: InferenceBackend = mock ? new MockBackend() : new VllmBackend({ gpus, models: models.length ? models : undefined, hfToken: process.env.HF_TOKEN, log: (l) => console.log(`${new Date().toISOString()} ${l}`) });
-  const concurrency = Number(process.env.BRAIN_NODE_CONCURRENCY) || (mock ? 1 : 4);
+  
+const backend: InferenceBackend =
+  mode === "mock"
+    ? new MockBackend()
+    : mode === "ollama"
+      ? new OllamaBackend()
+      : new VllmBackend({
+          gpus,
+          models: models.length ? models : undefined,
+          hfToken: process.env.HF_TOKEN,
+          log: (l) => console.log(`${new Date().toISOString()} ${l}`),
+        });
+
+  const concurrency = Number(process.env.BRAIN_NODE_CONCURRENCY) || (mode === "vllm" ? 4 : 1);
   const ask = process.env.BRAIN_NODE_ASK_USD_PER_1M ? Number(process.env.BRAIN_NODE_ASK_USD_PER_1M) : null;
 
-  console.log(`Brain Node ${id.nodeId} · ${mock ? "MOCK mode (simulated GPU, not a language model)" : `vLLM mode · ${gpus.map((g) => g.model).join(", ")}`} · coordinator ${url}`);
+ 
+const modeLabel =
+  mode === "mock"
+    ? "MOCK mode (simulated GPU)"
+    : mode === "ollama"
+      ? "Ollama mode · AMD GPU"
+      : `vLLM mode · ${gpus.map((g) => g.model).join(", ")}`;
+
+console.log(`Brain Node ${id.nodeId} · ${modeLabel} · coordinator ${url}`);
+
   const agent = new Agent(id, new HttpTransport(url, id), backend, {
     mock,
     region: process.env.BRAIN_NODE_REGION || null,
