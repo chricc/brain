@@ -265,6 +265,73 @@ describe("job state machine", () => {
     expect(after.state).toBe("ONLINE");
   });
 
+  it("completes a streamed Ollama job and records reported token usage", async () => {
+    const k = keypair();
+    const model = "qwen/qwen2.5-1.5b-instruct";
+    const hardware = hw(false);
+    hardware.gpus[0]!.model = "AMD Radeon RX 9070 XT";
+    hardware.gpus[0]!.source = "none";
+    hardware.cuda = false;
+
+    const n = await registerNativeNode({
+      protocol: 1,
+      nodeId: k.nodeId,
+      publicKey: k.pub,
+      agentVersion: "t",
+      hardware,
+      capabilities: caps([model], { backend: "ollama" }),
+    }, "ip");
+
+    await updateNativeNode(n.nodeId, (x) => {
+      x.benchmark = {
+        score: 100,
+        computeClass: "DATACENTER",
+        basis: "coordinator-timed",
+        at: Date.now(),
+      };
+    });
+
+    const t = Date.now();
+    const job = await createInferenceJob({
+      requesterId: "cust",
+      model,
+      messages: [{ role: "user", content: "hi" }],
+      maxTokens: 32,
+      temperature: 0,
+    }, t);
+
+    const assigned = await matchJob(job.jobId, t + 1);
+    expect(assigned.assignedNode).toBe(n.nodeId);
+
+    await reportStarted(n.nodeId, job.jobId, { backend: "ollama", loaded: true }, t + 100);
+    await reportProgress(n.nodeId, job.jobId, { seq: 0, delta: "hello", tokens: 1 }, t + 200);
+    await reportProgress(n.nodeId, job.jobId, { seq: 1, delta: " world", tokens: 2 }, t + 300);
+
+    const content = "hello world";
+    const done = await reportCompleted(n.nodeId, job.jobId, {
+      content,
+      finishReason: "stop",
+      usage: { prompt: 3, completion: 2 },
+      durationMs: 300,
+      responseHash: sha(content),
+    }, t + 400);
+
+    expect(done.state).toBe("COMPLETED");
+    expect(done.backend).toBe("ollama");
+    expect(done.output).toBe(content);
+    expect(done.tokenUsage).toEqual({ prompt: 3, completion: 2, basis: "node-reported" });
+    expect(done.computeDurationMs).toBe(200);
+
+    const saved = await getInferenceJob(job.jobId);
+    expect(saved?.state).toBe("COMPLETED");
+    expect(saved?.backend).toBe("ollama");
+
+    const node = (await getNativeNode(n.nodeId))!;
+    expect(node.measured.jobsCompleted).toBe(1);
+    expect(node.measured.tokensGenerated).toBe(2);
+    expect(node.measured.jobsFailed).toBe(0);
+    expect(node.activeJobIds).toEqual([]);
+  });
   it("fails verification when the hash or streamed text does not match", async () => {
     const { n } = await registerMock();
     const t = Date.now();
