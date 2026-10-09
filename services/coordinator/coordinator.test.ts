@@ -163,6 +163,55 @@ describe("registry", () => {
 describe("job state machine", () => {
   const stub = (state: InferenceJob["state"]): InferenceJob => ({ state, history: [] }) as unknown as InferenceJob;
 
+  it("preserves the Ollama backend when an AMD node starts a job", async () => {
+    const k = keypair();
+    const model = "qwen/qwen2.5-1.5b-instruct";
+    const hardware = hw(false);
+    hardware.gpus[0]!.model = "AMD Radeon RX 9070 XT";
+    hardware.gpus[0]!.source = "none";
+    hardware.cuda = false;
+
+    const n = await registerNativeNode({
+      protocol: 1,
+      nodeId: k.nodeId,
+      publicKey: k.pub,
+      agentVersion: "t",
+      hardware,
+      capabilities: caps([model], { backend: "ollama" }),
+    }, "ip");
+
+    await updateNativeNode(n.nodeId, (x) => {
+      x.benchmark = {
+        score: 100,
+        computeClass: "DATACENTER",
+        basis: "coordinator-timed",
+        at: Date.now(),
+      };
+    });
+
+    const t = Date.now();
+    const job = await createInferenceJob({
+      requesterId: "cust",
+      model,
+      messages: [{ role: "user", content: "hi" }],
+      maxTokens: 32,
+      temperature: 0,
+    }, t);
+
+    const assigned = await matchJob(job.jobId, t + 1);
+    expect(assigned.assignedNode).toBe(n.nodeId);
+
+    const started = await reportStarted(
+      n.nodeId,
+      job.jobId,
+      { backend: "ollama", loaded: true },
+      t + 100,
+    );
+
+    expect(started.state).toBe("STARTING");
+    expect(started.backend).toBe("ollama");
+    expect((await getInferenceJob(job.jobId))?.backend).toBe("ollama");
+  });
   it("only allows listed transitions", () => {
     expect(() => transition(stub("QUEUED"), "MATCHING", 1)).not.toThrow();
     expect(() => transition(stub("QUEUED"), "RUNNING", 1)).toThrow(/illegal_transition/);
