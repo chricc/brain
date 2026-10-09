@@ -81,6 +81,29 @@ describe("node authentication", () => {
 });
 
 describe("registry", () => {
+  it("preserves the Ollama backend for a real AMD node", async () => {
+    const k = keypair();
+    const model = "qwen/qwen2.5-1.5b-instruct";
+    const hardware = hw(false);
+    hardware.gpus[0]!.model = "AMD Radeon RX 9070 XT";
+    hardware.gpus[0]!.source = "none";
+    hardware.cuda = false;
+
+    const n = await registerNativeNode({
+      protocol: 1,
+      nodeId: k.nodeId,
+      publicKey: k.pub,
+      agentVersion: "t",
+      hardware,
+      capabilities: caps([model], { backend: "ollama" }),
+    }, "ip");
+
+    expect(n.reported.capabilities.backend).toBe("ollama");
+    expect(n.reported.hardware.mock).toBe(false);
+    expect(n.reported.capabilities.supportedModels).toEqual([model]);
+    expect((await getNativeNode(n.nodeId))?.reported.capabilities.backend).toBe("ollama");
+  });
+
   it("registers with trust-on-first-use and refuses a different key for the same id", async () => {
     const { k, n } = await registerMock();
     expect(n.state).toBe("ONLINE");
