@@ -190,6 +190,10 @@ export class OllamaBackend implements InferenceBackend {
       throw new Error("Ollama stream ended without [DONE]");
     }
 
+    if (!signal.aborted && usage === null) {
+      throw new Error("Ollama token usage missing from completed stream");
+    }
+
     return {
       content,
       finishReason,

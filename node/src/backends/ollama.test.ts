@@ -68,3 +68,38 @@ describe("OllamaBackend", () => {
     expect(options?.method).toBe("POST");
   });
 });
+
+describe("OllamaBackend missing usage", () => {
+  it("rejects a completed stream without token usage", async () => {
+    const events = [
+      'data: {"choices":[{"delta":{"content":"CIAO"},"finish_reason":"stop"}]}',
+      "data: [DONE]",
+      "",
+    ].join("\n\n");
+
+    vi.stubGlobal("fetch", vi.fn(async () =>
+      new Response(events, {
+        status: 200,
+        headers: { "content-type": "text/event-stream" },
+      })
+    ));
+
+    const backend = new OllamaBackend();
+
+    await expect(
+      backend.generate(
+        {
+          jobId: "test-ollama-missing-usage",
+          model: "qwen/qwen2.5-1.5b-instruct",
+          messages: [{ role: "user", content: "Saluta" }],
+          maxTokens: 32,
+          temperature: 0,
+          deadlineAt: Date.now() + 60_000,
+          flushMs: 100,
+        },
+        () => {},
+        new AbortController().signal
+      )
+    ).rejects.toThrow(/usage|token/i);
+  });
+});
